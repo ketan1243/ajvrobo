@@ -1,0 +1,19 @@
+# Secrets
+.env
+
+# Bot data (state / trade history)
+bot_state.json
+trades_history.csv
+data/
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# Logs / OS / editor
+*.log
+.DS_Store
+.vscode/
+.idea/
