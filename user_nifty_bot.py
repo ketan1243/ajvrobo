@@ -18,6 +18,7 @@ Telegram commands:
 import asyncio
 import csv
 import shutil
+import hmac
 import html
 import io
 import json
@@ -66,6 +67,13 @@ if not PROXY_URL and os.getenv("STATICIP_HOST", "").strip():
     _w = (os.getenv("STATICIP_PASS") or os.getenv("STATICIP_PASSWORD") or "").strip()
     _auth = f"{_q(_u, safe='')}:{_q(_w, safe='')}@" if _u else ""
     PROXY_URL = f"http://{_auth}{_h}{(':' + _p) if _p and ':' not in _h else ''}"
+
+# Admin password: Strategy/Timeframe buttons fakt "/admin <password>" lakhva thi j Settings ma dekhase.
+# Password code ma nahi, Railway Variables / .env ma ADMIN_PASSWORD tarike rakho. Khali hoy to koi badli na shake.
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "").strip()
+ADMIN_UNLOCK_SECONDS = 600          # unlock keta samay sudhi (10 min), pachi automatic lock
+_admin_until = 0.0
+_admin_fails = {"n": 0, "block_until": 0.0}
 
 ST_PERIOD = 10
 ST_MULT = 4.0
@@ -1760,6 +1768,40 @@ def authorized(update: Update) -> bool:
     return ALLOWED_CHAT_ID == 0 or update.effective_chat.id == ALLOWED_CHAT_ID
 
 
+def admin_unlocked() -> bool:
+    return bool(ADMIN_PASSWORD) and time.time() < _admin_until
+
+
+async def cmd_admin(update: Update, ctx):
+    """/admin <password> -> Strategy/Timeframe unlock (10 min).  /admin lock -> turant lock."""
+    global _admin_until
+    if not authorized(update):
+        return
+    chat_id = update.effective_chat.id
+    arg = (ctx.args[0] if ctx.args else "").strip()
+    try:
+        await update.message.delete()            # password chat ma na rahe
+    except Exception:
+        pass
+    if arg.lower() == "lock":
+        _admin_until = 0.0
+        return await ctx.bot.send_message(chat_id, "🔒 Admin lock thai gayu.")
+    if not ADMIN_PASSWORD:
+        return await ctx.bot.send_message(chat_id, "🔒 Admin password set nathi.")
+    now = time.time()
+    if now < _admin_fails["block_until"]:
+        return await ctx.bot.send_message(chat_id, "⛔ Ghana vadhu vaar khotu password. Thodi vaar pachi try karo.")
+    if not arg or not hmac.compare_digest(arg.encode(), ADMIN_PASSWORD.encode()):
+        _admin_fails["n"] += 1
+        if _admin_fails["n"] >= 5:
+            _admin_fails["n"], _admin_fails["block_until"] = 0, now + 900
+        return await ctx.bot.send_message(chat_id, "❌ Khotu password.")
+    _admin_fails["n"] = 0
+    _admin_until = now + ADMIN_UNLOCK_SECONDS
+    await ctx.bot.send_message(chat_id, f"🔓 Admin unlock ({ADMIN_UNLOCK_SECONDS // 60} min). Settings ma Strategy/Timeframe dekhase.")
+    await ctx.bot.send_message(chat_id, settings_text(), reply_markup=settings_kb())
+
+
 # ----------------------------- BOTTOM BUTTONS (type karvu nahi pade) -----------------
 BOTTOM_ROWS = [["📺 Dashboard", "🏠 Menu"], ["▶️ Run", "⏸ Stop"], ["📒 Orders", "⚙️ Settings"]]
 
@@ -1921,7 +1963,6 @@ def main_menu_text() -> str:
     pos = "📌 Open" if state["position"] else "➖ None"
     return (f"━━━ 🤖 NIFTY SPREAD BOT ━━━\n"
             f"Bot: {run}   Mode: {mode}\n"
-            f"Strategy: 🧠 {strategy_label()} • ⏱{CANDLE_MINUTES}m\n"
             f"Position: {pos}\n"
             f"Day realized: ₹{mode_realized():,.0f}\n"
             f"{('🛑 Daily limit hit: aaj trading band' + chr(10)) if state['day_halt'] else ''}"
@@ -2078,8 +2119,9 @@ def day_limit_text() -> str:
 
 def settings_text() -> str:
     return (f"⚙️ Settings • {state['mode'].upper()} mode ni alag (navi trade thi lagu)\n"
-            f"🧠 Strategy: {strategy_label()} • ⏱ {CANDLE_MINUTES}m\n"
-            f"⚠️ Strategy/timeframe badalta bot pause thase (Run pharithi dabavo)\n"
+            + (f"🧠 Strategy: {strategy_label()} • ⏱ {CANDLE_MINUTES}m\n"
+               f"⚠️ Strategy/timeframe badalta bot pause thase (Run pharithi dabavo)\n"
+               if admin_unlocked() else "") +
             f"Lots: {LOTS} (qty {LOT_SIZE * LOTS})\n"
             f"Sell strike: {sell_label(SELL_OFFSET)}\n"
             f"Hedge premium: {HEDGE_PCT * 100:.0f}% of sold option\n"
@@ -2106,12 +2148,12 @@ def settings_kb() -> Markup:
     strat_rows = [[Btn(("✅ " if k == state["strategy"] else "") + v["label"], callback_data=f"strat_{k}")]
                   for k, v in STRATEGIES.items()]
     tf = [Btn(("✅ " if m == CANDLE_MINUTES else "") + f"{m}m", callback_data=f"tf_{m}") for m in TIMEFRAMES]
+    admin_rows = ([[Btn("🧠 Strategy", callback_data="noop")], *strat_rows,
+                   [Btn("⏱ Timeframe", callback_data="noop")], tf[:3], tf[3:],
+                   [Btn("🔒 Admin lock karo", callback_data="admin_lock")]]
+                  if admin_unlocked() else [])
     return Markup([
-        [Btn("🧠 Strategy", callback_data="noop")],
-        *strat_rows,
-        [Btn("⏱ Timeframe", callback_data="noop")],
-        tf[:3],
-        tf[3:],
+        *admin_rows,
         [Btn("➖ Lots", callback_data="set_lots_-1"), Btn(f"{LOTS}", callback_data="noop"),
          Btn("➕ Lots", callback_data="set_lots_1")],
         [Btn("◀ ITM", callback_data="set_soff_-1"), Btn(f"Sell: {sell_label(SELL_OFFSET)}", callback_data="noop"),
@@ -2358,7 +2400,14 @@ async def on_button_inner(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if d == "strategy":
             await _ans(q, )
             return await show(settings_text(), settings_kb())
+        if d == "admin_lock":
+            global _admin_until
+            _admin_until = 0.0
+            await _ans(q, "🔒 Locked")
+            return await show(settings_text(), settings_kb())
         if d.startswith("tf_"):
+            if not admin_unlocked():
+                return await _ans(q, "🔒 Admin password joiye (/admin)", show_alert=True)
             if state["position"]:
                 return await _ans(q, "Position open che, pehla exit karo", show_alert=True)
             m = int(d[3:])
@@ -2369,6 +2418,8 @@ async def on_button_inner(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await _ans(q, f"Timeframe: {CANDLE_MINUTES} min • Bot paused")
             return await show(settings_text(), settings_kb())
         if d.startswith("strat_"):
+            if not admin_unlocked():
+                return await _ans(q, "🔒 Admin password joiye (/admin)", show_alert=True)
             if state["position"]:
                 return await _ans(q, "Position open che, pehla exit karo", show_alert=True)
             key = d[6:]
@@ -3566,7 +3617,7 @@ def main():
                      ("status", cmd_status), ("pnl", cmd_pnl), ("live", cmd_live), ("exit", cmd_exit),
                      ("signal", cmd_signal), ("summary", cmd_summary), ("help", cmd_help),
                      ("dashboard", cmd_dashboard), ("history", cmd_history),
-                     ("sl", cmd_sl), ("target", cmd_target), ("tp", cmd_target), ("time", cmd_time), ("trades", cmd_trades), ("export", cmd_export), ("expiry", cmd_expiry), ("daylimit", cmd_daylimit), ("testorder", cmd_testorder), ("orders", cmd_orders), ("strike", cmd_strike), ("storage", cmd_storage), ("keyboard", cmd_keyboard), ("sync", cmd_sync)]:
+                     ("sl", cmd_sl), ("target", cmd_target), ("tp", cmd_target), ("time", cmd_time), ("trades", cmd_trades), ("export", cmd_export), ("expiry", cmd_expiry), ("daylimit", cmd_daylimit), ("testorder", cmd_testorder), ("orders", cmd_orders), ("strike", cmd_strike), ("storage", cmd_storage), ("keyboard", cmd_keyboard), ("sync", cmd_sync), ("admin", cmd_admin)]:
         app.add_handler(CommandHandler(name, fn))
     app.add_handler(CommandHandler("menu", cmd_menu))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_bottom_text))
