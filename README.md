@@ -17,12 +17,13 @@ python user_nifty_bot.py
 | `TELEGRAM_CHAT_ID` | Tamaro chat id (fakt aa chat bot vapri shake) |
 | `ANGEL_API_KEY`, `ANGEL_CLIENT_ID`, `ANGEL_PIN`, `ANGEL_TOTP_SECRET` | Angel One credentials (live mode mate) |
 | `PROXY_URL` | Optional static IP proxy |
+| `ADMIN_PASSWORD` | Strategy/Timeframe unlock mate: Telegram ma `/admin <password>` |
 | `DATA_DIR` | Optional folder (Railway Volume: `/data`) |
 
 ## Telegram commands
 `/start /menu /dashboard /run /stop /exit /mode paper|live /pnl /summary /trades /history /settings`
 
-Strategy ane timeframe: Menu → ⚙️ Settings.
+Strategy ane timeframe: pehla `/admin <password>` lakho (10 min unlock), pachi Menu → ⚙️ Settings. `/admin lock` thi turant lock.
 
 ## Deploy (Railway)
 1. GitHub repo Railway sathe connect karo.
