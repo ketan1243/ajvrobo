@@ -378,10 +378,12 @@ def nifty_spot() -> float:
     return ltp("NSE", "Nifty 50", NIFTY_TOKEN)
 
 
-def lookback_days() -> int:
+def lookback_days(hist="__g__", minutes=None) -> int:
     """Indicator ma ketla divas no data levo (aagal na divas na candles pan). Angel limit mujab clamp."""
-    d = HISTORY_DAYS or TIMEFRAMES.get(CANDLE_MINUTES, (None, 6))[1]
-    return int(min(d, ANGEL_MAX_DAYS.get(CANDLE_MINUTES, 30)))
+    hist = HISTORY_DAYS if hist == "__g__" else hist
+    minutes = minutes or CANDLE_MINUTES
+    d = hist or TIMEFRAMES.get(minutes, (None, 6))[1]
+    return int(min(d, ANGEL_MAX_DAYS.get(minutes, 30)))
 
 
 def data_txt() -> str:
@@ -1815,7 +1817,7 @@ def bottom_kb():
 
 
 async def cmd_settings_btn(update: Update, ctx):
-    await update.message.reply_text(settings_text(), reply_markup=settings_kb())
+    await update.message.reply_text(settings_home_text(), reply_markup=settings_home_kb())
 
 
 async def on_bottom_text(update: Update, ctx):
@@ -1978,7 +1980,7 @@ def main_menu_kb() -> Markup:
         [Btn("📜 Today Trades", callback_data="trades")],
         [Btn("🚪 Exit Position", callback_data="exit")],
         [Btn("📝 Paper Mode", callback_data="mode_paper"), Btn("⚡ Live Mode", callback_data="mode_live")],
-        [Btn("⚙️ Settings", callback_data="settings"), Btn("🧪 Angel Test", callback_data="angeltest")],
+        [Btn("⚙️ Settings", callback_data="settings_home"), Btn("🧪 Angel Test", callback_data="angeltest")],
         [Btn("🔄 Refresh", callback_data="menu"), Btn("📒 Angel Orders", callback_data="angelorders")],
         [Btn("❓ Help", callback_data="help"), Btn("❌ Close", callback_data="close")],
     ])
@@ -2012,28 +2014,40 @@ def _shift_time(t: dtime, minutes: int) -> dtime:
     return (datetime.combine(datetime.today(), t) + timedelta(minutes=minutes)).time()
 
 
-def set_time_value(which: str, t: dtime):
+def validate_time(which: str, t: dtime, es: dtime, le: dtime, fe: dtime):
     """which: start | last | end. Error text return kare, sacha hoy to None."""
-    global ENTRY_START, LAST_ENTRY, FORCE_EXIT
     if which == "start":
-        if not (dtime(9, 15) <= t < LAST_ENTRY):
-            return f"Start time 09:15 thi {LAST_ENTRY:%H:%M} ni pehla joiye."
+        if not (dtime(9, 15) <= t < le):
+            return f"Start time 09:15 thi {le:%H:%M} ni pehla joiye."
+    elif which == "last":
+        hi = min(fe, dtime(15, 20))
+        if not (es < t <= hi):
+            return f"Last entry {es:%H:%M} pachi ane {hi:%H:%M} sudhi ma joiye."
+    else:
+        if not (le <= t <= dtime(15, 25)):
+            return f"End (square-off) {le:%H:%M} thi 15:25 vache joiye."
+    return None
+
+
+def set_time_value(which: str, t: dtime):
+    """Active mode mate time set (command). Error text return kare, sacha hoy to None."""
+    global ENTRY_START, LAST_ENTRY, FORCE_EXIT
+    err = validate_time(which, t, ENTRY_START, LAST_ENTRY, FORCE_EXIT)
+    if err:
+        return err
+    if which == "start":
         ENTRY_START = t
     elif which == "last":
-        hi = min(FORCE_EXIT, dtime(15, 20))
-        if not (ENTRY_START < t <= hi):
-            return f"Last entry {ENTRY_START:%H:%M} pachi ane {hi:%H:%M} sudhi ma joiye."
         LAST_ENTRY = t
     else:
-        if not (LAST_ENTRY <= t <= dtime(15, 25)):
-            return f"End (square-off) {LAST_ENTRY:%H:%M} thi 15:25 vache joiye."
         FORCE_EXIT = t
     return None
 
 
-def step_history(direction: int) -> int:
-    presets = [p for p in HISTORY_PRESETS if p <= ANGEL_MAX_DAYS.get(CANDLE_MINUTES, 30)]
-    cur = lookback_days()
+def step_history(direction: int, minutes=None, cur=None) -> int:
+    minutes = minutes or CANDLE_MINUTES
+    presets = [p for p in HISTORY_PRESETS if p <= ANGEL_MAX_DAYS.get(minutes, 30)]
+    cur = cur if cur is not None else lookback_days()
     if direction > 0:
         nxt = [p for p in presets if p > cur]
         return nxt[0] if nxt else presets[-1]
@@ -2041,15 +2055,61 @@ def step_history(direction: int) -> int:
     return prv[-1] if prv else presets[0]
 
 
+# ---------------- Settings view: Paper / Live alag alag setting ----------------
+_set_view = {"mode": None}        # None = active mode; "paper"/"live" = te mode ni setting jove/badle
+_TIME_KEYS = ("ENTRY_START", "LAST_ENTRY", "FORCE_EXIT")
+
+
+def view_mode() -> str:
+    m = _set_view["mode"]
+    return m if m in ("paper", "live") else state["mode"]
+
+
+def view_is_active() -> bool:
+    return view_mode() == state["mode"]
+
+
+def _view_profile() -> dict:
+    m = view_mode()
+    if not PROFILES.get(m):
+        PROFILES[m] = snapshot_settings()          # pehli vaar: atyar ni setting nu copy
+    return PROFILES[m]
+
+
+def V(name: str):
+    """Jonaar mode ni setting value (active hoy to globals, nahi to saved profile)."""
+    if view_is_active():
+        return globals()[name]
+    prof = _view_profile()
+    if name in prof:
+        val = prof[name]
+        if name in _TIME_KEYS:
+            try:
+                return datetime.strptime(val, "%H:%M").time()
+            except Exception:
+                return globals()[name]
+        return val
+    return globals()[name]
+
+
+def VSET(name: str, value):
+    if view_is_active():
+        globals()[name] = value
+    else:
+        _view_profile()[name] = value.strftime("%H:%M") if name in _TIME_KEYS else value
+
+
 def rules_text() -> str:
-    return ("🕒 Time & Rules\n"
+    es, le, fe = V("ENTRY_START"), V("LAST_ENTRY"), V("FORCE_EXIT")
+    hist, mins = V("HISTORY_DAYS"), V("CANDLE_MINUTES")
+    return (f"🕒 Time & Rules • {view_mode().upper()}\n"
             "━━━━━━━━━━━━━━━━━━\n"
-            f"🟢 Entry start: {ENTRY_START:%H:%M}\n"
-            f"⏳ Last new entry: {LAST_ENTRY:%H:%M}\n"
-            f"🔚 End (square-off): {FORCE_EXIT:%H:%M}\n"
-            f"☝️ One trade per trend: {'ON' if ONE_TRADE_PER_TREND else 'OFF'}\n"
-            f"📚 History: {lookback_days()} days{' (auto)' if HISTORY_DAYS is None else ''} • {CANDLE_MINUTES}m\n\n"
-            "Time ±5 min step ma badlay. Exact time mate:\n"
+            f"🟢 Entry start: {es:%H:%M}\n"
+            f"⏳ Last new entry: {le:%H:%M}\n"
+            f"🔚 End (square-off): {fe:%H:%M}\n"
+            f"☝️ One trade per trend: {'ON' if V('ONE_TRADE_PER_TREND') else 'OFF'}\n"
+            f"📚 History: {lookback_days(hist, mins)} days{' (auto)' if hist is None else ''} • {mins}m\n\n"
+            "Time ±5 min step ma badlay. Exact time mate (active mode):\n"
             "/time start 09:30\n/time last 14:30\n/time end 15:10\n\n"
             "One trade per trend ON: SL/Target/exit thaya pachi same trend ma navi trade nahi, "
             "trend flip thay tyare j.\n"
@@ -2058,50 +2118,55 @@ def rules_text() -> str:
 
 
 def rules_kb() -> Markup:
+    es, le, fe = V("ENTRY_START"), V("LAST_ENTRY"), V("FORCE_EXIT")
+    hist, mins = V("HISTORY_DAYS"), V("CANDLE_MINUTES")
+
     def trow(lab, which, t):
         return [Btn("➖", callback_data=f"rule_t{which}_-1"), Btn(f"{lab} {t:%H:%M}", callback_data="noop"),
                 Btn("➕", callback_data=f"rule_t{which}_1")]
     return Markup([
-        trow("🟢 Start", "start", ENTRY_START),
-        trow("⏳ Last entry", "last", LAST_ENTRY),
-        trow("🔚 End", "end", FORCE_EXIT),
-        [Btn(f"☝️ One trade/trend: {'ON' if ONE_TRADE_PER_TREND else 'OFF'}", callback_data="rule_otpt_0")],
+        trow("🟢 Start", "start", es),
+        trow("⏳ Last entry", "last", le),
+        trow("🔚 End", "end", fe),
+        [Btn(f"☝️ One trade/trend: {'ON' if V('ONE_TRADE_PER_TREND') else 'OFF'}", callback_data="rule_otpt_0")],
         [Btn("➖", callback_data="rule_hist_-1"),
-         Btn(f"📚 {lookback_days()}d{' auto' if HISTORY_DAYS is None else ''}", callback_data="noop"),
+         Btn(f"📚 {lookback_days(hist, mins)}d{' auto' if hist is None else ''}", callback_data="noop"),
          Btn("➕", callback_data="rule_hist_1")],
         [Btn("⬅️ Settings", callback_data="settings"), Btn("🏠 Menu", callback_data="menu")],
     ])
 
 
 def expiry_text() -> str:
+    em, skip = V("EXPIRY_MODE"), V("EXPIRY_SKIP_TODAY")
     try:
         exps = _expiry_list()
         today = pd.Timestamp(datetime.now().date())
         lines = []
         for m, name in EXPIRY_MODES.items():
             d_ = select_expiry(m)
-            lines.append(f"{'✅' if m == EXPIRY_MODE else '▫️'} {name}: {d_:%d %b %Y}"
+            lines.append(f"{'✅' if m == em else '▫️'} {name}: {d_:%d %b %Y}"
                          + ("  (aaje expiry!)" if d_ == today else ""))
         body = "\n".join(lines)
     except Exception:
         body = "Expiry list haju load nathi thayi."
-    return ("📅 Expiry select karo\n━━━━━━━━━━━━━━━━━━\n"
-            f"Active: {expiry_label()}\n\n{body}\n\n"
-            f"⏭ Expiry day par next expiry: {'ON' if EXPIRY_SKIP_TODAY else 'OFF'}\n\n"
+    return (f"📅 Expiry select karo • {view_mode().upper()}\n━━━━━━━━━━━━━━━━━━\n"
+            f"Active: {expiry_label(em)}\n\n{body}\n\n"
+            f"⏭ Expiry day par next expiry: {'ON' if skip else 'OFF'}\n\n"
             "Sell ane hedge banne same expiry ma thase. Navi trade thi lagu thase "
             "(chalu position ni expiry nahi badle).\n"
             "Monthly/next weekly ma spread vadhu hoy shake, premium moto pan liquidity ochhi.")
 
 
 def expiry_kb() -> Markup:
+    em, skip = V("EXPIRY_MODE"), V("EXPIRY_SKIP_TODAY")
     rows = []
     for m, name in EXPIRY_MODES.items():
         try:
             lab = f"{name.split(' (')[0]} • {select_expiry(m):%d %b}"
         except Exception:
             lab = name.split(' (')[0]
-        rows.append([Btn(("✅ " if m == EXPIRY_MODE else "") + lab, callback_data=f"exp_{m}")])
-    rows.append([Btn(f"⏭ Expiry day par next: {'ON' if EXPIRY_SKIP_TODAY else 'OFF'}", callback_data="exp_skip")])
+        rows.append([Btn(("✅ " if m == em else "") + lab, callback_data=f"exp_{m}")])
+    rows.append([Btn(f"⏭ Expiry day par next: {'ON' if skip else 'OFF'}", callback_data="exp_skip")])
     rows.append([Btn("⬅️ Settings", callback_data="settings"), Btn("🏠 Menu", callback_data="menu")])
     return Markup(rows)
 
@@ -2117,33 +2182,65 @@ def day_limit_text() -> str:
     return f"🛑 Daily limit: ON (loss -₹{DAY_LOSS_LIMIT:,.0f} / profit +₹{DAY_PROFIT_LIMIT:,.0f}){extra}"
 
 
+def _day_limit_text_v() -> str:
+    if view_is_active():
+        return day_limit_text()
+    if not V("DAY_LIMIT_ON"):
+        return "🛑 Daily limit: OFF"
+    return f"🛑 Daily limit: ON (loss -₹{V('DAY_LOSS_LIMIT'):,.0f} / profit +₹{V('DAY_PROFIT_LIMIT'):,.0f})"
+
+
+def settings_home_text() -> str:
+    act = "⚡ LIVE" if state["mode"] == "live" else "📝 PAPER"
+    return ("⚙️ Settings\n━━━━━━━━━━━━━━━━━━\n"
+            f"Bot atyare: {act} mode ma (✅ = active mode)\n\n"
+            "Kay mode ni setting kholvi chhe? Paper ane Live ni setting alag alag save thay chhe, "
+            "ek ni setting biji ne asar nahi kare.")
+
+
+def settings_home_kb() -> Markup:
+    return Markup([
+        [Btn(("✅ " if state["mode"] == "paper" else "") + "📝 Paper Settings", callback_data="setv_paper")],
+        [Btn(("✅ " if state["mode"] == "live" else "") + "⚡ Live Settings", callback_data="setv_live")],
+        [Btn("🏠 Menu", callback_data="menu")],
+    ])
+
+
 def settings_text() -> str:
-    return (f"⚙️ Settings • {state['mode'].upper()} mode ni alag (navi trade thi lagu)\n"
+    act = view_is_active()
+    vm = view_mode()
+    head = (f"⚙️ {vm.upper()} Settings • ACTIVE (navi trade thi lagu)\n" if act else
+            f"⚙️ {vm.upper()} Settings\n"
+            f"(Bot atyare {state['mode'].upper()} ma chhe. Aa setting {vm.upper()} mode ma jao tyare lagu thase)\n")
+    return (head
             + (f"🧠 Strategy: {strategy_label()} • ⏱ {CANDLE_MINUTES}m\n"
                f"⚠️ Strategy/timeframe badalta bot pause thase (Run pharithi dabavo)\n"
-               if admin_unlocked() else "") +
-            f"Lots: {LOTS} (qty {LOT_SIZE * LOTS})\n"
-            f"Sell strike: {sell_label(SELL_OFFSET)}\n"
-            f"Hedge premium: {HEDGE_PCT * 100:.0f}% of sold option\n"
-            f"🛡 Stop loss: {limit_text(SL_MODE, SL_VALUE)}\n"
-            f"🎯 Target: {limit_text(TP_MODE, TP_VALUE)}\n"
-            f"📅 Expiry: {expiry_label()}\n"
-            f"Signal flip exit: {'ON' if EXIT_ON_FLIP else 'OFF'}\n"
-            f"{day_limit_text()}\n"
-            f"🕒 Time: {ENTRY_START:%H:%M} - {LAST_ENTRY:%H:%M} (exit {FORCE_EXIT:%H:%M}) • "
-            f"1 trade/trend: {'ON' if ONE_TRADE_PER_TREND else 'OFF'}")
+               if (admin_unlocked() and act) else "") +
+            f"Lots: {V('LOTS')} (qty {LOT_SIZE * V('LOTS')})\n"
+            f"Sell strike: {sell_label(V('SELL_OFFSET'))}\n"
+            f"Hedge premium: {V('HEDGE_PCT') * 100:.0f}% of sold option\n"
+            f"🛡 Stop loss: {limit_text(V('SL_MODE'), V('SL_VALUE'))}\n"
+            f"🎯 Target: {limit_text(V('TP_MODE'), V('TP_VALUE'))}\n"
+            f"📅 Expiry: {expiry_label(V('EXPIRY_MODE'))}\n"
+            f"Signal flip exit: {'ON' if V('EXIT_ON_FLIP') else 'OFF'}\n"
+            f"{_day_limit_text_v()}\n"
+            f"🕒 Time: {V('ENTRY_START'):%H:%M} - {V('LAST_ENTRY'):%H:%M} (exit {V('FORCE_EXIT'):%H:%M}) • "
+            f"1 trade/trend: {'ON' if V('ONE_TRADE_PER_TREND') else 'OFF'}")
 
 
 def settings_kb() -> Markup:
-    dl_rows = [[Btn(f"🛑 Daily limit: {'ON' if DAY_LIMIT_ON else 'OFF'} 🔄", callback_data="set_dlim_0")]]
-    if DAY_LIMIT_ON:
+    act = view_is_active()
+    other = "live" if view_mode() == "paper" else "paper"
+    dl_on = V("DAY_LIMIT_ON")
+    dl_rows = [[Btn(f"🛑 Daily limit: {'ON' if dl_on else 'OFF'} 🔄", callback_data="set_dlim_0")]]
+    if dl_on:
         dl_rows += [
-            [Btn("➖", callback_data="set_dll_-1"), Btn(f"Loss -₹{DAY_LOSS_LIMIT:,.0f}", callback_data="noop"),
+            [Btn("➖", callback_data="set_dll_-1"), Btn(f"Loss -₹{V('DAY_LOSS_LIMIT'):,.0f}", callback_data="noop"),
              Btn("➕", callback_data="set_dll_1")],
-            [Btn("➖", callback_data="set_dlp_-1"), Btn(f"Profit +₹{DAY_PROFIT_LIMIT:,.0f}", callback_data="noop"),
+            [Btn("➖", callback_data="set_dlp_-1"), Btn(f"Profit +₹{V('DAY_PROFIT_LIMIT'):,.0f}", callback_data="noop"),
              Btn("➕", callback_data="set_dlp_1")],
         ]
-        if state["day_halt"]:
+        if act and state["day_halt"]:
             dl_rows.append([Btn("▶️ Resume today (limit ignore)", callback_data="set_dres_0")])
     strat_rows = [[Btn(("✅ " if k == state["strategy"] else "") + v["label"], callback_data=f"strat_{k}")]
                   for k, v in STRATEGIES.items()]
@@ -2151,26 +2248,27 @@ def settings_kb() -> Markup:
     admin_rows = ([[Btn("🧠 Strategy", callback_data="noop")], *strat_rows,
                    [Btn("⏱ Timeframe", callback_data="noop")], tf[:3], tf[3:],
                    [Btn("🔒 Admin lock karo", callback_data="admin_lock")]]
-                  if admin_unlocked() else [])
+                  if (admin_unlocked() and act) else [])
+    sl_m, sl_v, tp_m, tp_v = V("SL_MODE"), V("SL_VALUE"), V("TP_MODE"), V("TP_VALUE")
     return Markup([
         *admin_rows,
-        [Btn("➖ Lots", callback_data="set_lots_-1"), Btn(f"{LOTS}", callback_data="noop"),
+        [Btn("➖ Lots", callback_data="set_lots_-1"), Btn(f"{V('LOTS')}", callback_data="noop"),
          Btn("➕ Lots", callback_data="set_lots_1")],
-        [Btn("◀ ITM", callback_data="set_soff_-1"), Btn(f"Sell: {sell_label(SELL_OFFSET)}", callback_data="noop"),
+        [Btn("◀ ITM", callback_data="set_soff_-1"), Btn(f"Sell: {sell_label(V('SELL_OFFSET'))}", callback_data="noop"),
          Btn("OTM ▶", callback_data="set_soff_1")],
-        [Btn("➖ Hedge%", callback_data="set_hedge_-5"), Btn(f"{HEDGE_PCT * 100:.0f}%", callback_data="noop"),
+        [Btn("➖ Hedge%", callback_data="set_hedge_-5"), Btn(f"{V('HEDGE_PCT') * 100:.0f}%", callback_data="noop"),
          Btn("➕ Hedge%", callback_data="set_hedge_5")],
-        [Btn(f"🛡 SL type: {MODE_INFO[SL_MODE]['name']} 🔄", callback_data="set_slm_0")],
-        [Btn("➖", callback_data="set_slv_-1"), Btn(limit_short(SL_MODE, SL_VALUE), callback_data="noop"),
+        [Btn(f"🛡 SL type: {MODE_INFO[sl_m]['name']} 🔄", callback_data="set_slm_0")],
+        [Btn("➖", callback_data="set_slv_-1"), Btn(limit_short(sl_m, sl_v), callback_data="noop"),
          Btn("➕", callback_data="set_slv_1")],
-        [Btn(f"🎯 Target type: {MODE_INFO[TP_MODE]['name']} 🔄", callback_data="set_tpm_0")],
-        [Btn("➖", callback_data="set_tpv_-1"), Btn(limit_short(TP_MODE, TP_VALUE), callback_data="noop"),
+        [Btn(f"🎯 Target type: {MODE_INFO[tp_m]['name']} 🔄", callback_data="set_tpm_0")],
+        [Btn("➖", callback_data="set_tpv_-1"), Btn(limit_short(tp_m, tp_v), callback_data="noop"),
          Btn("➕", callback_data="set_tpv_1")],
         [Btn("📅 Expiry select", callback_data="expiry"), Btn("🕒 Time & Rules", callback_data="rules")],
-        [Btn(f"🔁 Flip exit: {'ON' if EXIT_ON_FLIP else 'OFF'}", callback_data="set_flip_0")],
+        [Btn(f"🔁 Flip exit: {'ON' if V('EXIT_ON_FLIP') else 'OFF'}", callback_data="set_flip_0")],
         *dl_rows,
-        [Btn(f"📋 {'LIVE' if state['mode'] == 'paper' else 'PAPER'} ni setting ahi copy karo", callback_data="set_copy_0")],
-        [Btn("⬅️ Back", callback_data="menu")],
+        [Btn(f"📋 {other.upper()} ni setting ahi copy karo", callback_data="set_copy_0")],
+        [Btn("⬅️ Paper/Live", callback_data="settings_home"), Btn("🏠 Menu", callback_data="menu")],
     ])
 
 
@@ -2367,10 +2465,10 @@ async def on_button_inner(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if d.startswith("exp_"):
             key = d[4:]
             if key == "skip":
-                EXPIRY_SKIP_TODAY = not EXPIRY_SKIP_TODAY
+                VSET("EXPIRY_SKIP_TODAY", not V("EXPIRY_SKIP_TODAY"))
             elif key in EXPIRY_MODES:
-                EXPIRY_MODE = key
-            await _ans(q, f"Expiry: {expiry_label()}")
+                VSET("EXPIRY_MODE", key)
+            await _ans(q, f"Expiry: {expiry_label(V('EXPIRY_MODE'))}")
             return await show(expiry_text(), expiry_kb())
         if d == "rules":
             await _ans(q, )
@@ -2380,21 +2478,27 @@ async def on_button_inner(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             v = int(val)
             if key in ("tstart", "tlast", "tend"):
                 which = {"tstart": "start", "tlast": "last", "tend": "end"}[key]
-                cur = {"start": ENTRY_START, "last": LAST_ENTRY, "end": FORCE_EXIT}[which]
-                err = set_time_value(which, _shift_time(cur, v * 5))
+                tkey = {"start": "ENTRY_START", "last": "LAST_ENTRY", "end": "FORCE_EXIT"}[which]
+                new_t = _shift_time(V(tkey), v * 5)
+                err = validate_time(which, new_t, V("ENTRY_START"), V("LAST_ENTRY"), V("FORCE_EXIT"))
                 if err:
                     return await _ans(q, err, show_alert=True)
+                VSET(tkey, new_t)
             elif key == "otpt":
-                ONE_TRADE_PER_TREND = not ONE_TRADE_PER_TREND
-                if not ONE_TRADE_PER_TREND:
+                VSET("ONE_TRADE_PER_TREND", not V("ONE_TRADE_PER_TREND"))
+                if view_is_active() and not ONE_TRADE_PER_TREND:
                     state["blocked_dir"] = None
             elif key == "hist":
-                if state["position"]:
-                    return await _ans(q, "Position open che, pehla exit karo", show_alert=True)
-                HISTORY_DAYS = step_history(v)
-                _sig_cache["val"], _sig_cache["bucket"] = None, None
-                state["last_signal_candle"] = None
-                state["running"] = False            # signal badlay to surprise entry na thay
+                if view_is_active():
+                    if state["position"]:
+                        return await _ans(q, "Position open che, pehla exit karo", show_alert=True)
+                    HISTORY_DAYS = step_history(v)
+                    _sig_cache["val"], _sig_cache["bucket"] = None, None
+                    state["last_signal_candle"] = None
+                    state["running"] = False            # signal badlay to surprise entry na thay
+                else:
+                    mins_ = V("CANDLE_MINUTES")
+                    VSET("HISTORY_DAYS", step_history(v, mins_, lookback_days(V("HISTORY_DAYS"), mins_)))
             await _ans(q, "Updated")
             return await show(rules_text(), rules_kb())
         if d == "strategy":
@@ -2485,54 +2589,70 @@ async def on_button_inner(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return await show(main_menu_text(), main_menu_kb())
 
         # ---- settings
+        if d == "settings_home":
+            await _ans(q, )
+            return await show(settings_home_text(), settings_home_kb())
+        if d.startswith("setv_"):
+            if d[5:] in ("paper", "live"):
+                _set_view["mode"] = d[5:]
+            await _ans(q, )
+            return await show(settings_text(), settings_kb())
         if d == "settings":
             await _ans(q, )
             return await show(settings_text(), settings_kb())
         if d.startswith("set_"):
             _, key, val = d.split("_", 2)
             v = int(val)
+            act = view_is_active()
             if key == "lots":
-                LOTS = max(1, min(50, LOTS + v))
+                VSET("LOTS", max(1, min(50, V("LOTS") + v)))
             elif key == "copy":
-                other = "live" if state["mode"] == "paper" else "paper"
-                if state["position"]:
-                    return await _ans(q, "Position open che, pehla exit karo", show_alert=True)
-                if not PROFILES.get(other):
-                    return await _ans(q, f"{other.upper()} ni setting haju save nathi", show_alert=True)
-                apply_settings(PROFILES[other])
-                state["running"] = False
-                state["last_signal_candle"] = None
+                other = "live" if view_mode() == "paper" else "paper"
+                if act:
+                    if state["position"]:
+                        return await _ans(q, "Position open che, pehla exit karo", show_alert=True)
+                    if not PROFILES.get(other):
+                        return await _ans(q, f"{other.upper()} ni setting haju save nathi", show_alert=True)
+                    apply_settings(PROFILES[other])
+                    state["running"] = False
+                    state["last_signal_candle"] = None
+                else:
+                    PROFILES[view_mode()] = snapshot_settings()      # active mode ni setting ahi copy
             elif key == "soff":
-                SELL_OFFSET = max(-5, min(5, SELL_OFFSET + v))
+                VSET("SELL_OFFSET", max(-5, min(5, V("SELL_OFFSET") + v)))
             elif key == "hedge":
-                HEDGE_PCT = max(0.10, min(0.60, round(HEDGE_PCT + v / 100, 2)))
+                VSET("HEDGE_PCT", max(0.10, min(0.60, round(V("HEDGE_PCT") + v / 100, 2))))
             elif key == "slm":
-                SL_MODE = MODE_ORDER[(MODE_ORDER.index(SL_MODE) + 1) % len(MODE_ORDER)]
-                SL_VALUE = MODE_INFO[SL_MODE]["default"]
+                nm = MODE_ORDER[(MODE_ORDER.index(V("SL_MODE")) + 1) % len(MODE_ORDER)]
+                VSET("SL_MODE", nm)
+                VSET("SL_VALUE", MODE_INFO[nm]["default"])
             elif key == "tpm":
-                TP_MODE = MODE_ORDER[(MODE_ORDER.index(TP_MODE) + 1) % len(MODE_ORDER)]
-                TP_VALUE = MODE_INFO[TP_MODE]["default"]
+                nm = MODE_ORDER[(MODE_ORDER.index(V("TP_MODE")) + 1) % len(MODE_ORDER)]
+                VSET("TP_MODE", nm)
+                VSET("TP_VALUE", MODE_INFO[nm]["default"])
             elif key == "slv":
-                i = MODE_INFO[SL_MODE]
-                SL_VALUE = max(i["lo"], min(i["hi"], SL_VALUE + v * i["step"]))
+                i = MODE_INFO[V("SL_MODE")]
+                VSET("SL_VALUE", max(i["lo"], min(i["hi"], V("SL_VALUE") + v * i["step"])))
             elif key == "tpv":
-                i = MODE_INFO[TP_MODE]
-                TP_VALUE = max(i["lo"], min(i["hi"], TP_VALUE + v * i["step"]))
+                i = MODE_INFO[V("TP_MODE")]
+                VSET("TP_VALUE", max(i["lo"], min(i["hi"], V("TP_VALUE") + v * i["step"])))
             elif key == "flip":
-                EXIT_ON_FLIP = not EXIT_ON_FLIP
+                VSET("EXIT_ON_FLIP", not V("EXIT_ON_FLIP"))
             elif key == "dlim":
-                DAY_LIMIT_ON = not DAY_LIMIT_ON
-                if not DAY_LIMIT_ON:
-                    state["day_halt"] = None
-                state["limit_override"] = False
+                VSET("DAY_LIMIT_ON", not V("DAY_LIMIT_ON"))
+                if act:
+                    if not DAY_LIMIT_ON:
+                        state["day_halt"] = None
+                    state["limit_override"] = False
             elif key == "dll":
-                DAY_LOSS_LIMIT = max(DAY_LIMIT_STEP, min(200000.0, DAY_LOSS_LIMIT + v * DAY_LIMIT_STEP))
+                VSET("DAY_LOSS_LIMIT", max(DAY_LIMIT_STEP, min(200000.0, V("DAY_LOSS_LIMIT") + v * DAY_LIMIT_STEP)))
             elif key == "dlp":
-                DAY_PROFIT_LIMIT = max(DAY_LIMIT_STEP, min(200000.0, DAY_PROFIT_LIMIT + v * DAY_LIMIT_STEP))
-            elif key == "dres":
+                VSET("DAY_PROFIT_LIMIT", max(DAY_LIMIT_STEP, min(200000.0, V("DAY_PROFIT_LIMIT") + v * DAY_LIMIT_STEP)))
+            elif key == "dres" and act:
                 state["day_halt"] = None
                 state["limit_override"] = True
                 state["last_signal_candle"] = None
+            save_state()
             await _ans(q, "Updated")
             return await show(settings_text(), settings_kb())
         await _ans(q, )
