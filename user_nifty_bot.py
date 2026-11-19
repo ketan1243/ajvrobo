@@ -1522,7 +1522,7 @@ async def open_position(direction: int, app: Application):
     state["last_event"] = f"{datetime.now():%H:%M} ENTRY {opt_type} spread"
     save_state()
     await notify(app,
-        f"✅ ENTRY [{state['mode'].upper()}] {strategy_label()} {'UP 🟢' if direction == 1 else 'DOWN 🔴'}\n"
+        f"✅ ENTRY [{state['mode'].upper()}] {'UP 🟢' if direction == 1 else 'DOWN 🔴'}\n"
         f"SELL {sell_opt['symbol']} @ {sell_px:.2f}  ({sel_lbl}, Nifty {spot:,.0f})\n"
         f"BUY  {hedge_opt['symbol']} @ {hedge_px:.2f}  (hedge, sell strike thi bahar)\n"
         f"Expiry: {expiry:%d %b %Y} ({EXPIRY_MODES[EXPIRY_MODE].split(' (')[0]})\n"
@@ -3400,8 +3400,6 @@ def trade_block(r: dict, num=None) -> str:
     L = [f"{'#' + str(num) + ' ' if num else ''}{'🟢' if pnl >= 0 else '🔴'} {r.get('date', '')} | "
          f"{et} → {xt}{f' ({dur:.0f}m)' if dur is not None else ''}",
          f"{r.get('type', '')} spread • {str(r.get('mode', '')).upper()} • Exp {_exp_txt(r.get('expiry'))}"]
-    if r.get("strategy"):
-        L.append(f"{r['strategy']} • {r.get('timeframe', '')}m")
     L.append(f"Lots: {lots:g} (Qty {qty:g})")
     es, xs = fnum(r, "entry_spot"), fnum(r, "exit_spot")
     if es is not None:
@@ -3485,8 +3483,6 @@ def stats_text(rows: list, title: str, daywise: bool = False) -> str:
         L.extend(f"• {k or '-'}: {c[0]} trades | {money(c[1])} | ✅{c[2]}" for k, c in g.items())
     group(lambda r: f"{r.get('type', '-')} spread", "By type")
     group(_reason_key, "By exit reason")
-    if any(r.get("strategy") for r in rows):
-        group(lambda r: r.get("strategy") or "-", "By strategy")
     if daywise:
         days = {}
         for r, x in zip(rows, pn):
@@ -3544,8 +3540,18 @@ def history_kb() -> Markup:
 def history_csv_bytes():
     if not os.path.exists(HISTORY_FILE):
         return None
-    with open(HISTORY_FILE, "rb") as f:
-        b = f.read()
+    try:                                   # export ma strategy/timeframe columns na dekhay (file ma data safe rahe)
+        with open(HISTORY_FILE, newline="", encoding="utf-8-sig") as f:
+            rows_ = list(csv.DictReader(f))
+        cols_ = [c for c in HISTORY_COLS if c not in ("strategy", "timeframe")]
+        out_ = io.StringIO()
+        w_ = csv.DictWriter(out_, fieldnames=cols_, extrasaction="ignore", restval="")
+        w_.writeheader()
+        w_.writerows(rows_)
+        b = out_.getvalue().encode("utf-8")
+    except Exception:
+        with open(HISTORY_FILE, "rb") as f:
+            b = f.read()
     if not b.strip():
         return None
     return b if b.startswith(b"\xef\xbb\xbf") else b"\xef\xbb\xbf" + b      # Excel ma ₹ ane text barabar
